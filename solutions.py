@@ -4,6 +4,13 @@
 # %%
 from transformer_lens import HookedTransformer
 import torch
+import torch.nn as nn
+import einops
+from typing import Callable
+from jaxtyping import Float
+from torch import Tensor
+from transformer_lens.hook_points import HookPoint
+from transformer_lens import HookedTransformerConfig
 torch.set_grad_enabled(False)
 
 model = HookedTransformer.from_pretrained("meta-llama/Llama-3.2-3B-Instruct")
@@ -180,15 +187,6 @@ for tok in par2_continued_tokens:
 
 
 # %% Define the LoRA block and Lora hooks needed
-
-import torch
-import torch.nn as nn
-import einops
-from typing import Callable
-from jaxtyping import Float
-from torch import Tensor
-from transformer_lens.hook_points import HookPoint
-from transformer_lens import HookedTransformerConfig
 
 DEBUG = False  # Add debug flag
 
