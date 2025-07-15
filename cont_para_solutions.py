@@ -208,3 +208,7 @@ for tok in par1_continued_tokens:
 par2_continued_tokens = transfer_activations(prompt_with_par1)
 for tok in par2_continued_tokens:
     print(model.to_str_tokens(tok))
+
+
+# %% [markdown]
+# Exercise 1:
