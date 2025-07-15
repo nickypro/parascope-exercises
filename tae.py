@@ -380,7 +380,7 @@ for src, tgt in word_pairs:
 
 
 # %% [markdown]
-# ## Exercise 7: Sentence Combination
+# ## Exercise 5: Sentence Combination
 #
 # This exercise explores how we can combine two sentences into a single embedding.
 # So far I have only tried a couple of the most naive approaches. It's ok but I suspect it should be easy to try better approaches to this also.
@@ -447,62 +447,7 @@ print("Sentence Combination Analysis:")
 print(df_comb.to_string(index=False))
 
 # %% [markdown]
-# ### Part 2: Generate Training Data
-#
-# We'll create a dataset of sentence pairs and their combined embeddings to train our model.
-
-# %%
-# Load a dataset for diverse sentences
-from datasets import load_dataset
-
-print("Generating training data...")
-dataset = load_dataset("nickypro/fineweb-llama3b-regen-split", split="train")
-
-# Extract individual sentences
-all_sentences = []
-for item in dataset.select(range(100)):  # Use first 100 documents
-    for paragraph in item['split_text']:
-        # Split paragraph into sentences (simple approach)
-        sentences = paragraph.split('. ')
-        for sent in sentences:
-            if 10 < len(sent) < 200:  # Filter by length
-                all_sentences.append(sent.strip())
-
-# Limit to manageable size
-all_sentences = all_sentences[:2000]
-print(f"Collected {len(all_sentences)} sentences")
-
-# Create pairs and compute embeddings
-print("Creating sentence pairs and embeddings...")
-training_data = []
-n_pairs = 1000  # Number of pairs to create
-
-for i in tqdm(range(n_pairs)):
-    # Randomly select two sentences
-    idx1, idx2 = np.random.choice(len(all_sentences), 2, replace=False)
-    sent1, sent2 = all_sentences[idx1], all_sentences[idx2]
-
-    # Compute embeddings
-    emb1 = text2vec.predict([sent1], source_lang="eng_Latn")
-    emb2 = text2vec.predict([sent2], source_lang="eng_Latn")
-
-    # Compute combined embedding
-    combined = f"{sent1} {sent2}"
-    emb_combined = text2vec.predict([combined], source_lang="eng_Latn")
-
-    training_data.append({
-        'emb1': emb1.cpu(),
-        'emb2': emb2.cpu(),
-        'emb_combined': emb_combined.cpu(),
-        'sent1': sent1,
-        'sent2': sent2
-    })
-
-print(f"Generated {len(training_data)} training examples")
-
-
-# %% [markdown]
-# ### Part 3: Try simple linear combination
+# ### Part 2: Try simple linear combination
 # If we want to combine two sentences, we can just add their embeddings? Or maybe average them? Will this give us something that works as an embedding with two sentences side-by-side?
 
 # %%
@@ -568,17 +513,116 @@ def test_performance_on_new_examples(model, verbose=True):
 # Test the simple linear combiner
 test_results = test_performance_on_new_examples(basic_combiner_model)
 
+# %% [markdown]
+# ### Part 3: Better ways of combining sentences.
+#
+# We can try to do better than just a simple linear combination to try get behaviour like concatenation. For this, we will need some training data.
+#
+# We'll create a dataset of sentence pairs and their combined embeddings to train our model.
+# As a source of data, use the provided dataset of llama-3.2-3b-instruct generated text.
+
+
+from datasets import load_dataset
+print("Getting training data...")
+dataset = load_dataset("nickypro/fineweb-llama3b-regen-split", split="train")
+# Extract individual sentences
+all_sentences = []
+for item in dataset.select(range(100)):  # Use first 100 documents
+    for paragraph in item['split_text']:
+        # Split paragraph into sentences (simple approach)
+        sentences = paragraph.split('. ')
+        for sent in sentences:
+            if 10 < len(sent) < 200:  # Filter by length
+                all_sentences.append(sent.strip())
+# Limit to manageable size
+all_sentences = all_sentences[:2000]
+print(f"Collected {len(all_sentences)} sentences")
 
 # %% [markdown]
 # What do you see?
 # In general, you should see that this kinda gets a sentence that is the same as one of the original sentences, or inbetween the two sentences. It doesn't really append one sentence to the other.
 
 # %% [markdown]
-# ### Part 4: Trained scale combination model
+# ### Exercise 5: Create Training Data for Sentence Combination
 #
-# We'll create simple model that learns to combine two sentence embeddings.
+# Now we need to create training data to teach our model how to combine sentence embeddings.
+# The goal is to learn a function that maps two individual sentence embeddings to the embedding
+# of their concatenation.
+#
+# **Your task**: Create pairs of sentences and compute their embeddings along with the embedding
+# of their concatenated form. This will give us input-output pairs for training.
+#
+# **Steps to implement**:
+# 1. Randomly select pairs of sentences from our collected sentences
+# 2. Compute embeddings for each individual sentence using SONAR
+# 3. Create a concatenated sentence by joining them with a space
+# 4. Compute the embedding of the concatenated sentence (this is our target)
+# 5. Store all embeddings and original text for training
+#
+# **Expected outcome**: A dataset where each example contains:
+# - Original sentences text for reference
+# - Two individual sentence embeddings (inputs)
+# - The embedding of their concatenation (target output)
 
 # %%
+def create_training_data(all_sentences: list[str], n_pairs: int = 1000) -> list[dict]:
+    """Create training data for sentence combination.
+
+    Args:
+        all_sentences: List of sentences to create training data from.
+        n_pairs: Number of pairs to create.
+
+    Returns:
+        List of dictionaries with training data.
+        Each dictionary contains:
+        - 'sent1': First sentence
+        - 'sent2': Second sentence
+        - 'emb1': Embedding of the first sentence
+        - 'emb2': Embedding of the second sentence
+        - 'emb_combined': Embedding of the concatenated sentence
+    """
+    print("Creating sentence pairs and embeddings...")
+    training_data = []
+
+    for i in tqdm(range(n_pairs)):
+        # Randomly select two sentences
+        idx1, idx2 = np.random.choice(len(all_sentences), 2, replace=False)
+        sent1, sent2 = all_sentences[idx1], all_sentences[idx2]
+
+        # Compute embeddings
+        emb1 = text2vec.predict([sent1], source_lang="eng_Latn")
+        emb2 = text2vec.predict([sent2], source_lang="eng_Latn")
+
+        # Compute combined embedding
+        combined = f"{sent1} {sent2}"
+        emb_combined = text2vec.predict([combined], source_lang="eng_Latn")
+
+        training_data.append({
+            'sent1': sent1,
+            'sent2': sent2
+            'emb1': emb1.cpu(),
+            'emb2': emb2.cpu(),
+            'emb_combined': emb_combined.cpu(),
+        })
+
+    print(f"Generated {len(training_data)} training examples")
+
+
+
+# %% [markdown]
+# ### Exercise 6: Trained scale combination model
+#
+# Now let's create a more sophisticated model that learns how to combine two sentence embeddings.
+# This model will have learnable parameters that can be optimized to better concatenate sentences.
+#
+# **Exercise**: Implement a ScaleCombinerModel that learns optimal weights for combining embeddings:
+# - Initialize learnable scale parameters for each input embedding
+# - Add a learnable constant bias term
+# - The output should be: const + scale1*embedding1 + scale2*embedding2
+
+# %% [markdown]
+# define the simple scaled linear combiner model
+
 class ScaleCombinerModel(nn.Module):
     """
     Simple linear combiner model:
@@ -606,79 +650,109 @@ scale_combiner_model = ScaleCombinerModel(embed_dim=1024).to(DEVICE)
 print(f"Model parameters: {sum(p.numel() for p in scale_combiner_model.parameters()):,}")
 
 # %% [markdown]
-# ### Part 5: Train the Model
+# Write the training loop for the model.
+#
 
 # %%
 
-def train_combiner_model(model, training_data):
-    """Train the combiner model on the provided training data."""
-    torch.set_grad_enabled(True)  # We're now training
+class CombinerModelTrainer:
+    """Trainer class for the ScaleCombinerModel."""
 
-    # Prepare data for training
-    X1 = torch.stack([d['emb1'].squeeze(0) for d in training_data])
-    X2 = torch.stack([d['emb2'].squeeze(0) for d in training_data])
-    Y = torch.stack([d['emb_combined'].squeeze(0) for d in training_data])
+    def __init__(self, model, device=None):
+        self.model = model
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.train_losses = []
+        self.test_losses = []
 
-    # Split into train/test
-    X1_train, X1_test, X2_train, X2_test, Y_train, Y_test = train_test_split(
-        X1, X2, Y, test_size=0.2, random_state=42
-    )
-    X1_train = X1_train.to(DEVICE)
-    X2_train = X2_train.to(DEVICE)
-    Y_train = Y_train.to(DEVICE)
-    X1_test = X1_test.to(DEVICE)
-    X2_test = X2_test.to(DEVICE)
-    Y_test = Y_test.to(DEVICE)
+    def prepare_data(self, training_data, test_size=0.2, random_state=42):
+        """Prepare training data by stacking embeddings and splitting train/test."""
+        X1 = torch.stack([d['emb1'].squeeze(0) for d in training_data])
+        X2 = torch.stack([d['emb2'].squeeze(0) for d in training_data])
+        Y = torch.stack([d['emb_combined'].squeeze(0) for d in training_data])
 
-    # Training setup
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    criterion = nn.MSELoss()
+        # Split into train/test
+        X1_train, X1_test, X2_train, X2_test, Y_train, Y_test = train_test_split(
+            X1, X2, Y, test_size=test_size, random_state=random_state
+        )
 
-    # Training loop
-    epochs = 10
-    batch_size = 32
-    train_losses = []
-    test_losses = []
+        # Convert to tensors and move to device
+        self.X1_train = torch.tensor(X1_train).to(self.device)
+        self.X2_train = torch.tensor(X2_train).to(self.device)
+        self.Y_train = torch.tensor(Y_train).to(self.device)
+        self.X1_test = torch.tensor(X1_test).to(self.device)
+        self.X2_test = torch.tensor(X2_test).to(self.device)
+        self.Y_test = torch.tensor(Y_test).to(self.device)
 
-    print("Training a combiner model...")
-    for epoch in range(epochs):
-        # Training
-        model.train()
+    def train_epoch(self, optimizer, criterion, batch_size=32):
+        """Train for one epoch."""
+        self.model.train()
         epoch_loss = 0
-        for i in range(0, len(X1_train), batch_size):
-            batch_x1 = X1_train[i:i+batch_size]
-            batch_x2 = X2_train[i:i+batch_size]
-            batch_y = Y_train[i:i+batch_size]
+
+        for i in range(0, len(self.X1_train), batch_size):
+            batch_x1 = self.X1_train[i:i+batch_size]
+            batch_x2 = self.X2_train[i:i+batch_size]
+            batch_y = self.Y_train[i:i+batch_size]
 
             optimizer.zero_grad()
-            pred = model(batch_x1, batch_x2)
+            pred = self.model(batch_x1, batch_x2)
             loss = criterion(pred, batch_y)
             loss.backward()
             optimizer.step()
 
             epoch_loss += loss.item()
 
-        # Evaluation
-        model.eval()
+        return epoch_loss
+
+    def evaluate(self, criterion):
+        """Evaluate model on train and test sets."""
+        self.model.eval()
         with torch.no_grad():
-            train_pred = model(X1_train, X2_train)
-            train_loss = criterion(train_pred, Y_train).item()
+            train_pred = self.model(self.X1_train, self.X2_train)
+            train_loss = criterion(train_pred, self.Y_train).item()
 
-            test_pred = model(X1_test, X2_test)
-            test_loss = criterion(test_pred, Y_test).item()
+            test_pred = self.model(self.X1_test, self.X2_test)
+            test_loss = criterion(test_pred, self.Y_test).item()
 
-            train_losses.append(train_loss)
-            test_losses.append(test_loss)
+        return train_loss, test_loss
 
-        if epoch % 5 == 0 or epoch == epochs - 1:
-            print(f"Epoch {epoch+1}: Train Loss = {train_loss:.4f}, Test Loss = {test_loss:.4f}")
+    def train(self, training_data, epochs=10, lr=1e-3, batch_size=32, verbose=True):
+        """Train the combiner model on the provided training data."""
+        torch.set_grad_enabled(True)  # Enable gradients for training
 
-    return train_losses, test_losses
+        # Prepare data
+        self.prepare_data(training_data)
+
+        # Training setup
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        criterion = nn.MSELoss()
+
+        # Reset loss tracking
+        self.train_losses = []
+        self.test_losses = []
+
+        if verbose:
+            print("Training a combiner model...")
+
+        for epoch in range(epochs):
+            # Training
+            epoch_loss = self.train_epoch(optimizer, criterion, batch_size)
+
+            # Evaluation
+            train_loss, test_loss = self.evaluate(criterion)
+
+            self.train_losses.append(train_loss)
+            self.test_losses.append(test_loss)
+
+            if verbose and (epoch % 5 == 0 or epoch == epochs - 1):
+                print(f"Epoch {epoch+1}: Train Loss = {train_loss:.4f}, Test Loss = {test_loss:.4f}")
+
+        return self.train_losses, self.test_losses
 
 # Train the model
 try:
     torch.set_grad_enabled(True)  # We're now training but only in this cell
-    train_losses, test_losses = train_combiner_model(scale_combiner_model, training_data)
+    trainer = CombinerModelTrainer(scale_combiner_model, DEVICE)
+    train_losses, test_losses = trainer.train(training_data)
 except Exception as e:
     print(f"Error training model: {e}")
     print(e.traceback)
@@ -698,4 +772,5 @@ test_results = test_performance_on_new_examples(scale_combiner_model)
 # What do you see?
 # It does a better job, it seems to be approximately one sentence followed by the other, but kind still mixes the two sentences up a but sometimes.
 
-# %%
+# %% [markdown]
+# Bonus: Try to improve the model. Maybe there are better ways to combine the sentences to get concat? Can you get it so that it reliably concatenates two sentences in the correct order?
