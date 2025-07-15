@@ -133,8 +133,7 @@ def reconstruct_text(texts: list[str]) -> list[str]:
         List of reconstructed strings.
     """
     # [your implementation here]
-    embedding = text2vec.predict(texts, source_lang="eng_Latn")
-    return vec2text.predict(embedding, target_lang="eng_Latn", max_seq_len=512)
+    raise NotImplementedError()
 
 # Longer example paragraphs
 paragraph1 = """SONAR is a model from August 2023, trained as a semantic text auto-encoder,
@@ -188,17 +187,9 @@ def test_noise_robustness(text, noise_levels):
     for noise_scale in noise_levels:
         # [your implementation here]
         # Add Gaussian noise
-        noise = torch.randn_like(original_emb)
-        noise = noise_scale * original_norm * noise / torch.norm(noise)
-        noisy_emb = original_emb + noise
-
         # Decode noisy embedding
-        reconstructed = vec2text.predict(noisy_emb, target_lang="eng_Latn", max_seq_len=512)[0]
-
         # Calculate cosine similarity
-        cosine_sim = torch.nn.functional.cosine_similarity(
-            original_emb, noisy_emb, dim=1
-        ).item()
+        raise NotImplementedError()
 
         results.append({
             'noise_scale': noise_scale,
@@ -331,13 +322,10 @@ fig.show()
 def diff_vector(src_text: str, tgt_text: str) -> Float[torch.Tensor, "1024"]:
     """Return embedding difference between *tgt_text* and *src_text* (tgt − src)."""
     # [your implementation here]
-    src_emb = text2vec.predict([src_text], source_lang="eng_Latn")
-    tgt_emb = text2vec.predict([tgt_text], source_lang="eng_Latn")
-    return (tgt_emb - src_emb).squeeze(0)
+    raise NotImplementedError()
 
 def decode(embedding: torch.Tensor, max_seq_len: int = 512) -> str:
     """Greedy‑decode a single 1024‑D embedding back to text."""
-    # [your implementation here]
     return vec2text.predict(embedding.unsqueeze(0), target_lang="eng_Latn", max_seq_len=max_seq_len)[0]
 
 
@@ -348,11 +336,7 @@ def positional_diff(src_word: str, tgt_word: str, pos: int, *, seq_len: int, fil
     specific to that location.
     """
     # [your implementation here]
-    src_tokens = [filler] * seq_len
-    tgt_tokens = [filler] * seq_len
-    src_tokens[pos] = src_word
-    tgt_tokens[pos] = tgt_word
-    return diff_vector(" ".join(src_tokens), " ".join(tgt_tokens))
+    raise NotImplementedError()
 
 assert diff_vector("dog", "cat").shape == (1024,)
 assert isinstance(decode(torch.randn(1024), 5), str)
@@ -413,7 +397,7 @@ sentence_pairs = [
     ("The Earth orbits the Sun", "Pizza is my favorite food"),
 
     # Question-answer pairs
-    ("What's your favorite color?", "My favorite color is blue"),
+    ("What's yraise NotImplementedError()our favorite color?", "My favorite color is blue"),
     ("Where do you live?", "I live in New York City"),
 ]
 
@@ -594,17 +578,7 @@ def create_training_data(all_sentences: list[str], n_pairs: int = 1000) -> list[
     for i in tqdm(range(n_pairs)):
         # Randomly select two sentences
         # [your implementation here]
-        idx1, idx2 = np.random.choice(len(all_sentences), 2, replace=False)
-        sent1, sent2 = all_sentences[idx1], all_sentences[idx2]
-
-        # Compute embeddings
-        emb1 = text2vec.predict([sent1], source_lang="eng_Latn")
-        emb2 = text2vec.predict([sent2], source_lang="eng_Latn")
-
-        # Compute combined embedding
-        combined = f"{sent1} {sent2}"
-        emb_combined = text2vec.predict([combined], source_lang="eng_Latn")
-        # [~# end of exercise]
+        raise NotImplementedError()
 
         training_data.append({
             'sent1': sent1,
@@ -652,8 +626,7 @@ class ScaleCombinerModel(nn.Module):
     def forward(self, x, y):
         # Simple linear combination
         # [your implementation here]
-        output = self.const + self.scale1 * x + self.scale2 * y
-        return output
+        raise NotImplementedError()
 
 # Initialize model
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -701,17 +674,7 @@ class CombinerModelTrainer:
 
         for i in range(0, len(self.X1_train), batch_size):
             # [your implementation here]
-            batch_x1 = self.X1_train[i:i+batch_size]
-            batch_x2 = self.X2_train[i:i+batch_size]
-            batch_y = self.Y_train[i:i+batch_size]
-
-            optimizer.zero_grad()
-            pred = self.model(batch_x1, batch_x2)
-            loss = criterion(pred, batch_y)
-            loss.backward()
-            optimizer.step()
-
-            epoch_loss += loss.item()
+            raise NotImplementedError()
 
         return epoch_loss
 
@@ -720,11 +683,7 @@ class CombinerModelTrainer:
         self.model.eval()
         with torch.no_grad():
             # [your implementation here]
-            train_pred = self.model(self.X1_train, self.X2_train)
-            train_loss = criterion(train_pred, self.Y_train).item()
-
-            test_pred = self.model(self.X1_test, self.X2_test)
-            test_loss = criterion(test_pred, self.Y_test).item()
+            raise NotImplementedError()
 
         return train_loss, test_loss
 
