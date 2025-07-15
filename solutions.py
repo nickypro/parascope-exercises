@@ -4,8 +4,8 @@ from transformer_lens import HookedTransformer
 import torch
 torch.set_grad_enabled(False)
 
-# model = HookedTransformer.from_pretrained("meta-llama/Llama-3.2-3B-Instruct")
-model = HookedTransformer.from_pretrained("google/gemma-2-9b-it")
+model = HookedTransformer.from_pretrained("meta-llama/Llama-3.2-3B-Instruct")
+# model = HookedTransformer.from_pretrained("google/gemma-2-9b-it")
 
 # %%
 # First run: capture attention activations
@@ -17,9 +17,12 @@ for name in list(model.hook_dict.keys())[:32]:  # Show first 10 hook points
 # Example string to work with
 prompt = \
 """Question:
-Please write two paragraphs, each of length 2 sentences. The first should describe polycistic kidney disease, and the second should describe monster trucks. Do not say explicitly name the topic, and do not say anything else.
+
+Please write two paragraphs, each of length 2 sentences. The first should describe monster trucks, and the second should describe paracetamol. Do not say explicitly name the topic, and do not say anything else.
+
 Answer:
-"""
+
+Gigantic vehicles with massive tires and powerful engines dominate the racing scene, crushing cars and other obstacles with ease. Their massive size and strength make them a thrilling sight to behold for fans of high-speed competition.\n\n"""
 
 example_string = prompt #+ par1
 
@@ -70,7 +73,7 @@ print(f"Stored activations for layers: {list(global_data.keys())}")
 # %%
 # Run with hooks again to modify activations of attention output
 new_str = "\n"
-new_tokens = model.to_tokens(new_str)
+new_tokens = model.to_tokens([new_str for _ in range(10)])
 has_been_modified = set()
 
 def modify_attn_hook(attn_act, hook):
@@ -91,7 +94,9 @@ modify_hook_list = [
 ]
 
 with model.hooks(fwd_hooks=modify_hook_list):
-    new_generated_tokens = model.generate(new_tokens, max_new_tokens=12, do_sample=True, temperature=0.3)
+    new_generated_tokens = model.generate(new_tokens, max_new_tokens=15, do_sample=True, temperature=0.3)
 
-print(f"New generated tokens: {model.to_str_tokens(new_generated_tokens)}")
+print(f"New generated tokens:")
+for new_generated_token in new_generated_tokens:
+    print(model.to_str_tokens(new_generated_token))
 # %%
