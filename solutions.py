@@ -1,7 +1,13 @@
 # %% [markdown]
 # Simple impementation of Continuation ParaScope.
 #
+# %% [markdown]
+# imports. Just run and continue unless there are errors.
+# you may need to install some packages:
+
 # %%
+# !pip install -q transformer-lens plotly pandas matplotlib seaborn numpy scikit-learn datasets transformers
+
 from transformer_lens import HookedTransformer
 import torch
 import torch.nn as nn
@@ -13,6 +19,29 @@ from transformer_lens.hook_points import HookPoint
 from transformer_lens import HookedTransformerConfig
 torch.set_grad_enabled(False)
 
+# # Continuation ParaScope Implementation
+#
+# ParaScope (Paragraph Scope) is a method for extracting paragraph-level information from language model residual streams.
+# The core idea is to decode what a language model is "planning" to write in an upcoming paragraph by analyzing the
+# residual stream activations at transition points (like "\n\n" tokens).
+#
+# ![ParaScope Illustration](https://39669.cdn.cke-cs.com/rQvD3VnunXZu34m86e5f/images/7421b220f111e4736b9a8d5a7bae0d0267d1b321fbda5461.png)
+#
+# **Continuation ParaScope** is the simplest approach:
+# 1. Extract residual stream activations at a "\n\n" token from some original text
+# 2. Create a minimal prompt with just "<bos>\n\n"
+# 3. Replace the residual activations of the "\n\n" token with the saved activations
+# 4. Generate text to see what the model "planned" to write
+#
+# This tests whether language models encode information about upcoming paragraphs in their residual streams,
+# providing evidence for either explicit or implicit planning in language generation.
+
+# %% [markdown]
+# ## Setup and Installation
+#
+# Install necessary packages for transformer models and evaluation metrics.
+
+# %%
 model = HookedTransformer.from_pretrained("meta-llama/Llama-3.2-3B-Instruct")
 
 # print("Available hook points:")
@@ -145,6 +174,7 @@ def transfer_activations(tokens, num_copies=10):
     function that runs the model once with the original prompt, saves the activations, then runs the model again with the new prompt, modifying the activations to match the original.
     """
 
+    # [your implementation here]
     # Save original activations
     with model.hooks(fwd_hooks=act_store.store_hook_list()):
         logits = model(tokens, return_type="logits")
@@ -178,6 +208,9 @@ for tok in par1_continued_tokens:
 par2_continued_tokens = transfer_activations(prompt_with_par1)
 for tok in par2_continued_tokens:
     print(model.to_str_tokens(tok))
+
+# %%
+# == WORK IN PROGRESS BELOW ==
 
 # %% [markdown]
 # ## LoRA Fine-tuning
@@ -333,10 +366,9 @@ class LoraAllLayers(nn.Module):
             fwd_hooks.extend(self.lora_hooks[layer_idx].list_fwd_hooks(layer_idx))
         return fwd_hooks
 
-# %%
-lora = LoraAllLayers(model.cfg, lora_alpha=32, rank=4)
+# lora = LoraAllLayers(model.cfg, lora_alpha=32, rank=4)
 
-with model.hooks(fwd_hooks=lora.list_fwd_hooks()):
-    logits = model(prompt_tokens, return_type="logits")
+# with model.hooks(fwd_hooks=lora.list_fwd_hooks()):
+#     logits = model(prompt_tokens, return_type="logits")
 
 # %%
