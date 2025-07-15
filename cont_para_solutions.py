@@ -111,8 +111,8 @@ print(f"Index of first newline: {index_of_first_newline} ({[output_str_tokens[in
 
 par1_tokens = output_tokens[:, :index_of_first_newline+1]
 par2_tokens = output_tokens[:, index_of_first_newline+1:]
-par1_str = model.to_string(par1_tokens)
-par2_str = model.to_string(par2_tokens)
+par1_str = model.to_string(par1_tokens)[0]
+par2_str = model.to_string(par2_tokens)[0]
 prompt_with_par1 = torch.cat((prompt_tokens, par1_tokens), dim=-1)
 print(par1_str)
 print(par2_str)
@@ -179,7 +179,7 @@ act_store = ActStore(model)
 #
 # The process works as follows:
 # 1. Run the model on a "source" prompt that contains rich context (e.g., a paragraph with specific style/content)
-# 2. Store the intermediate activations (residual stream values) from key layers during this forward pass
+# 2. Store the intermediate activations (residual stream values) from all the layers for the token of interest on the source prompt
 # 3. Run the model on a "target" prompt that lacks context (e.g., just "\n\n")
 # 4. During the target generation, replace the activations at the same positions with the stored activations from the source
 # 5. This allows the model to generate text as if it had the original context, even though the target prompt is minimal
@@ -189,9 +189,13 @@ act_store = ActStore(model)
 
 # Get the full string (example + generated text)
 
-def transfer_activations(tokens: torch.Tensor, num_copies: int = 10):
+def transfer_activations(tokens: torch.Tensor, num_copies: int = 10, num_tokens: int = 30):
     """
-    function that runs the model once with the original prompt, with hooks to save the activations, then runs the model again with the new prompt, with hooks modifying the activations to match the original.
+    Function that:
+    - runs the model once with the original prompt, with hooks to save the activations
+    - Creates a new prompt with "\n\n" repeated num_copies times
+    - then runs the model again with the new prompt, with hooks modifying the activations at the final token to match the original, ang generates many tokens.
+
     """
 
     # [your implementation here]
@@ -205,7 +209,7 @@ def transfer_activations(tokens: torch.Tensor, num_copies: int = 10):
 
     # Run with hooks again to modify activations of attention output
     with model.hooks(fwd_hooks=act_store.modify_hook_list()):
-        new_generated_tokens = model.generate(new_tokens, max_new_tokens=15, do_sample=True, temperature=0.3)
+        new_generated_tokens = model.generate(new_tokens, max_new_tokens=num_tokens, do_sample=True, temperature=0.3)
 
     return new_generated_tokens
 
@@ -262,16 +266,7 @@ def calculate_similarities(original_text, continued_tokens):
     similarities = []
 
     for cont_tokens in continued_tokens:
-        cont_text = model.to_str_tokens(cont_tokens)
-        if isinstance(cont_text, list):
-            # Handle nested lists by flattening
-            flat_tokens = []
-            for token in cont_text:
-                if isinstance(token, list):
-                    flat_tokens.extend(token)
-                else:
-                    flat_tokens.append(token)
-            cont_text = ''.join(flat_tokens)
+        cont_text = ''.join(model.to_str_tokens(cont_tokens))
 
         # Calculate cosine similarity
         if original_text and cont_text:
@@ -304,6 +299,9 @@ print(f"Paragraph 1 mean similarity: {np.mean(par1_similarities):.3f}")
 print(f"Paragraph 2 mean similarity: {np.mean(par2_similarities):.3f}")
 
 # %% [markdown]
+# ### Bonus: Test which layers are most important for the continuation.
+# We use all the layers, but maybe some are more important than others? Try to change which layers are selected or sweep through them.
+#
 # ### Bonus: (ie: exercises not yet implemented)
 # Try to replicate other parts of the post:
 # [https://link.nicky.pro/parascopes](https://link.nicky.pro/parascopes)
