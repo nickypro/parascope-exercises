@@ -16,19 +16,12 @@
 # %% [markdown]
 # ## Setup and Installation
 #
-# First, we need to install SONAR and its dependencies.
+# First, we need to install SONAR and its dependencies. Just run, nothing worth reading here unless you get errors.
 # Note: You may need to adjust the CUDA version in fairseq2 installation.
 
 # %%
 !pip install -q fairseq2==0.4.5 sonar-space==0.4.0 torchvision==0.21.0 torch==2.6.0 torchaudio==2.6.0 plotly nbformat
 
-# %% [markdown]
-# ## Exercise 1: Loading SONAR Models
-#
-# Load the SONAR text-to-embedding and embedding-to-text models.
-# These models work as an autoencoder pair.
-
-# %%
 import torch
 import numpy as np
 from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
@@ -40,6 +33,9 @@ import plotly.graph_objects as go
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from datasets import load_dataset
+import json
+from jaxtyping import Float
 
 # Check if CUDA is available
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -47,7 +43,42 @@ DEVICE = torch.device(DEVICE)
 torch.set_grad_enabled(False)  # We're only doing inference
 print(f"Using device: {DEVICE}")
 
-# Load the models
+# %% [markdown]
+# ## Loading SONAR Models
+#
+# SONAR (Sentence-Level Multimodal and Language-Agnostic Representations) is Meta's text autoencoder
+# that can encode entire sentences/paragraphs into fixed-size vectors and decode them back to approximately
+# the original text.
+#
+# **What are Text Autoencoders?**
+#
+# Text Autoencoders are models that compress entire input sequences (sentences/paragraphs) into a single
+# fixed-size vector representation (the "bottleneck"), then reconstruct the original text from that vector.
+# Unlike typical text embedding models that only encode, these models have both an encoder AND decoder.
+#
+# ![Text Autoencoder Architecture](https://39669.cdn.cke-cs.com/rQvD3VnunXZu34m86e5f/images/db8d350884974ce6dcb1281011c5053e11b65711c12a4556.png)
+#
+# **How Text Autoencoders Work:**
+# 1. **Encoder**: Takes input text → processes through Transformer → outputs single fixed-size vector (1024-dim)
+# 2. **Bottleneck**: The compressed representation that captures semantic meaning in a dense vector
+# 3. **Decoder**: Takes the vector → generates text that approximates the original input
+#
+# **Key Properties:**
+# - **Lossy compression**: Some information is lost, but semantic meaning is preserved
+# - **Fixed-size representation**: Any length text becomes same-size vector (useful for comparison/clustering)
+# - **Cross-lingual**: Can encode in one language and decode in another
+# - **Reconstruction capability**: Unlike embedding-only models, you can decode back to text
+# - **Semantic preservation**: The bottleneck captures core meaning even with compression
+#
+# **SONAR Specifically:**
+# - Trained on ~100B tokens with denoising and translation objectives
+# - Uses 24-layer Transformer encoder and decoder, with mean-pooling to create the bottleneck vector
+# - Supports 200+ languages and can handle up to 512 tokens of context
+# - Currently one of the best-performing text autoencoders available
+#
+
+# %% [markdown]
+# We start by loading the models.
 print("Loading SONAR models...")
 text2vec = TextToEmbeddingModelPipeline(
     encoder="text_sonar_basic_encoder",
@@ -62,7 +93,7 @@ vec2text = EmbeddingToTextModelPipeline(
 print("Models loaded successfully!")
 
 # %% [markdown]
-# ## Exercise 2: Basic Usage - Encoding and Decoding
+# ## Basic Usage - Encoding and Decoding
 #
 # Test basic encoding and decoding functionality.
 
@@ -88,11 +119,23 @@ for orig, rec in zip(sentences, reconstructed):
     print()
 
 # %% [markdown]
-# ## Exercise 3: Testing with Longer, More Realistic Text
-#
+# ## Exercise 1: Testing with Longer, More Realistic Text
 # Let's test how well SONAR handles paragraph-length text.
+#
+# Write a function to reconstruct text from SONAR embeddings, and try testing with some longer text.
 
-# %%
+def reconstruct_text(texts: list[str]) -> list[str]:
+    """Reconstruct text from SONAR embedding, by first encoding and then decoding the text.
+
+    Args:
+        texts: List of strings to reconstruct.
+
+    Returns:
+        List of reconstructed strings.
+    """
+    embedding = text2vec.predict(texts, source_lang="eng_Latn")
+    return vec2text.predict(embedding, target_lang="eng_Latn", max_seq_len=512)
+
 # Longer example paragraphs
 paragraph1 = """SONAR is a model from August 2023, trained as a semantic text auto-encoder,
 converting text into semantic embed vectors, which can later be decoded back into text.
@@ -103,10 +146,13 @@ paragraph2 = """I tried it, and SONAR seems to work surprisingly well. For examp
 paragraph and this paragraph, if each are encoded into two 1024 dimensional vectors
 (one for each paragraph), the model returns the following decoded outputs."""
 
+paragraph3 = """\
+Your text here.
+"""
+
 # Test with paragraphs
-long_texts = [paragraph1, paragraph2]
-long_embeddings = text2vec.predict(long_texts, source_lang="eng_Latn")
-long_reconstructed = vec2text.predict(long_embeddings, target_lang="eng_Latn", max_seq_len=512)
+long_texts = [paragraph1, paragraph2, paragraph3]
+long_reconstructed = reconstruct_text(long_texts)
 
 print("Paragraph reconstruction:")
 for i, (orig, rec) in enumerate(zip(long_texts, long_reconstructed)):
@@ -117,15 +163,19 @@ for i, (orig, rec) in enumerate(zip(long_texts, long_reconstructed)):
     print(rec[:100] + "..." if len(rec) > 100 else rec)
 
 # %% [markdown]
-# How well does it work for longer text? It should be doing a pretty good job.
+# How well does it work for longer text? It should be doing a pretty good job. Bonus: How long does the text get before you see some degradation?
 
 # %% [markdown]
-# ## Exercise 4: Noise Robustness Analysis
+# ## Exercise 2: Noise Robustness Analysis
 #
-# How robust is SONAR to noise in the embedding space?
-# We'll add Gaussian noise of varying magnitudes and see when reconstruction breaks down.
+# In this exercise, we investigate SONAR's robustness to perturbations in the embedding space.
+# We'll systematically add Gaussian noise of increasing magnitude to text embeddings and analyze
+# how reconstruction quality degrades. This helps us understand:
+# 1. How stable the embedding space is to small perturbations
+# 2. The sensitivity of the decoder to different noise directions
+#
+# Write a function to test the robustness of SONAR to noise, and try it out with some different noise levels.
 
-# %%
 def test_noise_robustness(text, noise_levels):
     """Test how reconstruction quality degrades with noise.
 
@@ -159,7 +209,7 @@ def test_noise_robustness(text, noise_levels):
 
 # Test with different noise levels
 test_text = "The quick brown fox jumps over the lazy dog."
-noise_levels = [0.0, 0.1, 0.3, 0.5, 0.7, 1.0]
+noise_levels = [0.0, 0.1, 0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 2.5, 3.0]
 
 print(f"Original text: {test_text}\n")
 results = test_noise_robustness(test_text, noise_levels)
@@ -175,10 +225,20 @@ for res in results:
 # It should be the case that with little noise, the reconstruction is still good. With more noise, the reconstruction gets worse. However, I found there is a lot of variance in the results, so try running it a few times. It seems like some directions have basically no effect, and others have a lot of effect.
 
 # %% [markdown]
-# ## Exercise 5: Text Length vs Vector Norm Analysis
+# ## Exercise 3: Text Length vs Vector Norm Analysis
 #
-# Does the L2 norm of embeddings correlate with text length?
-# This helps us understand how information is packed into the embedding space.
+# ### Exercise 3: Investigating the Relationship Between Text Length and Embedding Norms
+#
+# In this exercise, we'll explore whether there's a correlation between the length of text
+# and the L2 norm (magnitude) of its embedding vector. This analysis will help us understand:
+# - How semantic information is distributed across embedding dimensions
+# - Whether longer texts result in larger embedding magnitudes
+# - If the embedding space has inherent biases based on text length
+#
+# We'll test this hypothesis using three different types of text:
+# 1. Repeated words (to test pure length effects)
+# 2. Random character sequences (to test meaningless content)
+# 3. Natural language sentences (to test realistic content)
 
 # %%
 import plotly.express as px
@@ -204,7 +264,6 @@ for length in range(1, 100):
         words = [word] * length
         text = ' '.join(words)
         add_data(text, 'Repeated Words')
-
 
 # Random characters (more examples)
 random.seed(42)
@@ -236,8 +295,6 @@ for text in normal_sentences:
     add_data(text, 'Real Text')
 
 
-from datasets import load_dataset
-import json
 dataset = load_dataset("nickypro/fineweb-llama3b-regen-split", split="train")
 for split_text in dataset.select(range(20)):
     for paragraph in split_text['split_text']:
@@ -259,7 +316,7 @@ fig = px.scatter(df,
 fig.show()
 
 # %% [markdown]
-# ## Exercise 6: Token Swapping Experiments
+# ## Exercise 4: Token Swapping Experiments
 #
 # This exercise explores how we can manipulate text embeddings to perform token swapping.
 # We'll investigate:
@@ -272,10 +329,10 @@ fig.show()
 
 def diff_vector(src_text: str, tgt_text: str) -> torch.Tensor:
     """Return embedding difference between *tgt_text* and *src_text* (tgt − src)."""
+
     src_emb = text2vec.predict([src_text], source_lang="eng_Latn")
     tgt_emb = text2vec.predict([tgt_text], source_lang="eng_Latn")
     return (tgt_emb - src_emb).squeeze(0)
-
 
 def decode(embedding: torch.Tensor) -> str:
     """Greedy‑decode a single 1024‑D embedding back to text."""
