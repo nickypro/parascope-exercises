@@ -1,7 +1,6 @@
 """ Excercises on Text Autoencoders"""
 # %% [markdown]
 # # Section 1: Text Autoencoders - Exploring SONAR
-# ==============================================
 
 # This notebook explores Meta's SONAR text autoencoder, which can encode text
 # into fixed-size vectors and decode them back to (approximately) the original text.
@@ -475,8 +474,8 @@ def test_performance_on_new_examples(model, verbose=True):
     ]
 
     # Add one random pair
-    idx1, idx2 = np.random.choice(len(all_sentences), 2, replace=False)
-    test_pairs.append((all_sentences[idx1], all_sentences[idx2]))
+    # idx1, idx2 = np.random.choice(len(all_sentences), 2, replace=False)
+    # test_pairs.append((all_sentences[idx1], all_sentences[idx2]))
 
     test_results = []
 
@@ -543,7 +542,7 @@ print(f"Collected {len(all_sentences)} sentences")
 # In general, you should see that this kinda gets a sentence that is the same as one of the original sentences, or inbetween the two sentences. It doesn't really append one sentence to the other.
 
 # %% [markdown]
-# ### Exercise 5: Create Training Data for Sentence Combination
+# ### Part 4: Create Training Data for Sentence Combination
 #
 # Now we need to create training data to teach our model how to combine sentence embeddings.
 # The goal is to learn a function that maps two individual sentence embeddings to the embedding
@@ -599,18 +598,19 @@ def create_training_data(all_sentences: list[str], n_pairs: int = 1000) -> list[
 
         training_data.append({
             'sent1': sent1,
-            'sent2': sent2
+            'sent2': sent2,
             'emb1': emb1.cpu(),
             'emb2': emb2.cpu(),
             'emb_combined': emb_combined.cpu(),
         })
 
     print(f"Generated {len(training_data)} training examples")
+    return training_data
 
-
+training_data = create_training_data(all_sentences)
 
 # %% [markdown]
-# ### Exercise 6: Trained scale combination model
+# ### Part 5: Trained scale combination model
 #
 # Now let's create a more sophisticated model that learns how to combine two sentence embeddings.
 # This model will have learnable parameters that can be optimized to better concatenate sentences.
@@ -676,12 +676,12 @@ class CombinerModelTrainer:
         )
 
         # Convert to tensors and move to device
-        self.X1_train = torch.tensor(X1_train).to(self.device)
-        self.X2_train = torch.tensor(X2_train).to(self.device)
-        self.Y_train = torch.tensor(Y_train).to(self.device)
-        self.X1_test = torch.tensor(X1_test).to(self.device)
-        self.X2_test = torch.tensor(X2_test).to(self.device)
-        self.Y_test = torch.tensor(Y_test).to(self.device)
+        self.X1_train = X1_train.to(self.device)
+        self.X2_train = X2_train.to(self.device)
+        self.Y_train = Y_train.to(self.device)
+        self.X1_test = X1_test.to(self.device)
+        self.X2_test = X2_test.to(self.device)
+        self.Y_test = Y_test.to(self.device)
 
     def train_epoch(self, optimizer, criterion, batch_size=32):
         """Train for one epoch."""
@@ -715,7 +715,7 @@ class CombinerModelTrainer:
 
         return train_loss, test_loss
 
-    def train(self, training_data, epochs=10, lr=1e-3, batch_size=32, verbose=True):
+    def train(self, training_data, epochs=100, lr=1e-3, batch_size=32, verbose=True):
         """Train the combiner model on the provided training data."""
         torch.set_grad_enabled(True)  # Enable gradients for training
 
@@ -743,7 +743,7 @@ class CombinerModelTrainer:
             self.train_losses.append(train_loss)
             self.test_losses.append(test_loss)
 
-            if verbose and (epoch % 5 == 0 or epoch == epochs - 1):
+            if verbose and (epoch % 20 == 0 or epoch == epochs - 1):
                 print(f"Epoch {epoch+1}: Train Loss = {train_loss:.4f}, Test Loss = {test_loss:.4f}")
 
         return self.train_losses, self.test_losses
@@ -773,4 +773,40 @@ test_results = test_performance_on_new_examples(scale_combiner_model)
 # It does a better job, it seems to be approximately one sentence followed by the other, but kind still mixes the two sentences up a but sometimes.
 
 # %% [markdown]
-# Bonus: Try to improve the model. Maybe there are better ways to combine the sentences to get concat? Can you get it so that it reliably concatenates two sentences in the correct order?
+# ## Bonus Exercise: Try to improve the model.
+# Maybe there are better ways to combine the sentences to get concat? Can you get it so that it reliably concatenates two sentences in the correct order?
+# %%
+class BetterCombinerModel(nn.Module):
+    """
+    Simple linear combiner model:
+    output = const + (scale1)*x + (scale2)*y
+    """
+    def __init__(self, embed_dim=1024):
+        super().__init__()
+        self.embed_dim = embed_dim
+        # Constant bias
+        self.const = nn.Parameter(torch.zeros(embed_dim))
+        # other parameters
+        # [your code here]
+        raise NotImplementedError()
+
+    def forward(self, x, y):
+        # [your code here]
+        raise NotImplementedError()
+
+# Initialize model
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+better_combiner_model = BetterCombinerModel(embed_dim=1024).to(DEVICE)
+print(f"Model parameters: {sum(p.numel() for p in better_combiner_model.parameters()):,}")
+
+# Train the model
+try:
+    torch.set_grad_enabled(True)  # We're now training but only in this cell
+    trainer = CombinerModelTrainer(better_combiner_model, DEVICE)
+    train_losses, test_losses = trainer.train(training_data)
+except Exception as e:
+    print(f"Error training model: {e}")
+    print(e.traceback)
+finally:
+    torch.set_grad_enabled(False)  #
+
