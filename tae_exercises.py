@@ -20,6 +20,7 @@
 
 # %%
 !pip install -q fairseq2==0.4.5 sonar-space==0.4.0 torchvision==0.21.0 torch==2.6.0 torchaudio==2.6.0 plotly nbformat numpy>=2.0.0 jaxtyping
+!pip install -q -U datasets
 
 import torch
 import numpy as np
