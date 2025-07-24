@@ -41,6 +41,7 @@ import einops
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 from pathlib import Path
+from torch.utils.data import DataLoader
 
 # SONAR imports
 from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
@@ -59,7 +60,7 @@ print(f"Using device: {DEVICE}")
 from transformer_lens import HookedTransformer
 from datasets import load_dataset
 
-model = HookedTransformer.from_pretrained("meta-llama/Llama-3.2-3B-Instruct", device=DEVICE)
+model = HookedTransformer.from_pretrained("meta-llama/Llama-3.2-3B-Instruct", device=DEVICE, dtype=torch.bfloat16)
 
 # %% [markdown]
 # ## Exercise 1: Generating Training Data
@@ -71,55 +72,75 @@ model = HookedTransformer.from_pretrained("meta-llama/Llama-3.2-3B-Instruct", de
 # ### Part 1: Generating Prompts
 
 # %%
-def format_prompt(prompt: str) -> str:
-    """Format prompt using the model's chat template."""
-    messages = [
-        {"role": "user", "content": prompt}
-    ]
-    return model.tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=False,
-    )
+def format_prompt(prompt: list[str] | str, system_prompt: str = None) -> list[str]:
+    def format_prompt_string(prompt: str) -> str:
+        """Format prompt using the model's chat template."""
+        messages = [
+            {"role": "user", "content": prompt}
+        ]
+        if system_prompt:
+            messages.insert(0, {"role": "system", "content": system_prompt})
+        return model.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    if isinstance(prompt, str):
+        return [format_prompt_string(prompt)]
+    elif isinstance(prompt, list):
+        return [format_prompt_string(p) for p in prompt]
 
-def format_question(text: str, max_chars: int = 32000) -> str:
+def format_question_string(text: str, max_chars: int = 32000) -> str:
     """Transform existing text into a generation prompt."""
     return f"""Content: {text[:max_chars]}
 
-REQUEST: Write a prompt based on the above text, that is a single-paragraph, high-level description. Make the prompt in the format: "Write a (article/piece/entry), which includes (1-2 topics). The piece should be approximately (n-paragraphs) long."
+REQUEST: Write a prompt based on the above text, that is a single-paragraph, high-level description. Make the prompt in the format: "Write a (article/piece/entry), which includes (2-5 topics). The piece should be approximately (many n-paragraphs) long."
 
 Only provide the prompt, do not write anything else."""
 
+def format_question(text: list[str] | str, max_chars: int = 4000) -> list[str]:
+    if isinstance(text, str):
+        return [format_question_string(text, max_chars)]
+    elif isinstance(text, list):
+        return [format_question_string(t, max_chars) for t in text]
+    else:
+        raise ValueError(f"Invalid text type: {type(text)}")
+
 # Load dataset and generate training data
 print("Loading dataset...")
-dataset = load_dataset("HuggingFaceFW/fineweb", "sample-10BT", split="train", streaming=True)
+dataset = load_dataset("HuggingFaceFW/fineweb-edu", "sample-10BT", split="train", streaming=True)
+train_dataloader = DataLoader(dataset.take(4), batch_size=1)
+# Note: for whatever reason with TransformerLens HookedTransformer,
+# the generation does not work correctly with batching?
+# TODO: make it work with batch > 1
 
 # Step 1: Generate prompts from texts
 prompts = []
-for i, text in enumerate(dataset.take(3)):  # Start with just 3 examples
-    print(f"Processing text {i+1}/3...")
-
+for data in train_dataloader:  # Start with just 4 examples
     # Format the meta-prompt properly
-    meta_prompt = format_question(text["text"])
-    formatted_prompt = format_prompt(meta_prompt)
+    meta_prompt = format_question(data["text"])
+    formatted_prompt = format_prompt(meta_prompt, system_prompt="You are a prompt-writing assistant. You are given a text and you need to write a prompt that will generate a response that is similar to the text.")
 
     # Tokenize and generate
-    prompt_tokens = model.to_tokens(formatted_prompt)
+    model.tokenizer.pad_token_id = model.tokenizer.eos_token_id
+    prompt_tokens = model.to_tokens(
+        formatted_prompt, prepend_bos=False, padding_side="left")
     generated_tokens = model.generate(
         prompt_tokens,
         max_new_tokens=200,
         do_sample=True,
-        temperature=0.7
+        temperature=0.7,
     )
 
     # Extract just the generated part
     output_tokens = generated_tokens[:, len(prompt_tokens[0]):-1]
-    generated_prompt = model.to_string(output_tokens)[0]
+    generated_prompt = model.to_string(output_tokens)
 
-    prompts.append(generated_prompt.strip())
+    prompts.extend([t.strip() for t in generated_prompt])
 
 print(f"Generated {len(prompts)} training examples")
-print(f"Example prompt: {prompts[0]}")
+print(f"Example prompts:")
+[print(f"{i}: {[p]}") for i, p in enumerate(prompts)]
 
 # %% [markdown]
 # ### Part 2: Generate Model Outputs from Prompts
@@ -131,7 +152,8 @@ for i, prompt in enumerate(prompts):
 
     # Format and tokenize the prompt
     formatted_prompt = format_prompt(prompt)
-    prompt_tokens = model.to_tokens(formatted_prompt)
+    prompt_tokens = model.to_tokens(
+        formatted_prompt, prepend_bos=False, padding_side="left")
 
     # Generate response
     output_tokens = model.generate(
@@ -148,7 +170,8 @@ for i, prompt in enumerate(prompts):
     model_outputs.append(generated_text.strip())
 
 print(f"Generated {len(model_outputs)} model outputs")
-print(f"Example output: {model_outputs[0][:200]}...")
+print(f"Example outputs:")
+[print(f"{i}: {[o]}") for i, o in enumerate(model_outputs)]
 
 # %% [markdown]
 # ### Part 3: Loading Pre-made Data
@@ -218,7 +241,112 @@ print(split_sections[0])
 # We need to load pre-generated data containing:
 # - Residual stream activations from language models
 # - Corresponding SONAR embeddings of the paragraphs
-# - The actual paragraph text
+# - The actual paragraph text (we got this above)
+
+# %% [markdown]
+# ### Part 1: Loading Residual Streams
+# So the transformer model has blocks of:
+# [resid_pre] -> Attention -> [resid_mid] -> MLP -> [resid_post] == [resid_pre_n+1]
+# I have only tested things so far with residual difference
+# I.e: resid_mid = resid_pre + attn_results == resid_pre + resid_mid_diff == resid_pre + (resid_mid - resid_pre)
+# I find it more consistent to calculate (option 1):
+# * resid_mid_diff = resid_mid - resid_pre
+# * resid_post_diff = resid_post - resid_mid
+# alternatively, we could do (option 2):
+# * resid_layer_diff = resid_post - resid_pre
+# which should also work.
+# My testing so far has used option 1, mostly so I can somewhat see where it is easier to extract the information.
+# I suspect that the probes could work also using the basline activations [resid_mid, resid_post] or even just [resid_post], but I haven't tested it.
+
+# %% [markdown]
+# We make hooks for storing activations of the residual stream at the correct positions. That is, the final token of each "section" of tokens.
+# For now, we just save [resid_pre, resid_mid, resid_post] at the end of each section.
+# Later we can process it however we want.
+
+
+def get_act_data(split_text, act_types=None, verbose=False):
+    # choose which residual data to collect
+    if act_types is None:
+        act_types = ["hook_resid_pre", "hook_resid_mid", "hook_resid_post"]
+    hook_names = [
+        f"blocks.{i}.{resid_type}"
+            for i in range(model.cfg.n_layers)
+            for resid_type in act_types
+    ]
+
+    # get prompt vs output separately
+    prompt = split_text[0]
+    output = split_text[1:]
+
+    # Tokenize the prompt and output correctly
+    prompt_tokens =  model.to_tokens(prompt, prepend_bos=True)
+    output_tokens = [model.to_tokens(o, prepend_bos=False) for o in output]
+    if verbose:
+        print(prompt_tokens.shape, [o.shape for o in output_tokens])
+    all_tokens = torch.cat([prompt_tokens, torch.cat(output_tokens, dim=1)], dim=1)
+
+    # Get the indices of the residual streams that we want to store
+    # Ie: last token of each section, usually "\n\n"
+    final_indices_rel = [
+        prompt_tokens.shape[-1],
+        *[ o.shape[-1] for o in output_tokens ]
+    ]
+    final_indices_abs = np.cumsum(final_indices_rel) - 1
+
+    # check the tokens are actually the newline ones
+    if verbose:
+        print(model.to_str_tokens(all_tokens[:, final_indices_abs]))
+
+    # Create hooks to store activations of only the correct residual streams
+    act_data = {}
+    def store_act(act, hook):
+        act_data[hook.name] = act[..., final_indices_abs, :]
+    hook_list = [(name, store_act) for name in hook_names]
+
+    # Run model and store activations
+    with model.hooks(fwd_hooks=hook_list):
+        model.forward(all_tokens)
+
+    # Print some info
+    if verbose:
+        for k, v in act_data.items():
+            print(k, v.shape)
+            break
+
+    return act_data
+
+act_data = get_act_data(split_sections[0]["split_text"], verbose=True)
+
+# %%
+# Now we actually save residual stream diff data, as describe as "option 1" above.
+
+def get_resid_diff_data(split_text, act_types=None, verbose=False):
+    act_data = get_act_data(split_text, act_types, verbose)
+
+    # Calculate the difference between the residual streams
+    act_data["resid_mid_diff"]  = [
+        act_data[f"blocks.{i}.hook_resid_mid"] - act_data[f"blocks.{i}.hook_resid_pre"]
+        for i in range(model.cfg.n_layers)
+    ]
+    act_data["resid_post_diff"] = [
+        act_data[f"blocks.{i}.hook_resid_post"] - act_data[f"blocks.{i}.hook_resid_mid"]
+        for i in range(model.cfg.n_layers)
+    ]
+
+    # Concatenate the data into a single tensor
+    # I previously did this as [batch==1, layers, tokens, d_model]
+    # where layers is ordered as [resid_pre_0] + \
+    # [mid_diff_0, post_diff_0, mid_diff_1, post_diff_1, ...]
+    # So for consistency, we store it this way.
+    full_act_data = [act_data["blocks.0.hook_resid_pre"]]
+    for i in range(model.cfg.n_layers):
+        full_act_data.append(act_data["resid_mid_diff"][i])
+        full_act_data.append(act_data["resid_post_diff"][i])
+
+    return torch.cat(full_act_data, dim=0).unsqueeze(0)
+
+resid_diff_data = get_resid_diff_data(split_sections[0]["split_text"], verbose=True)
+resid_diff_data.shape
 
 # %%
 # Data loading utilities (simplified from your code)
