@@ -25,8 +25,9 @@
 # First, install SONAR and other required packages.
 
 # %%
-!pip install -q sonar-space torch torchvision transformer-lens sentence-transformers
-!pip install -q matplotlib seaborn pandas numpy scikit-learn einops
+#!pip install -q sonar-space torch torchvision transformer-lens sentence-transformers
+#
+#!pip install -q matplotlib seaborn pandas numpy scikit-learn einops
 
 # %%
 import torch
@@ -494,9 +495,7 @@ print(dataset[0]["embeds"].shape)
 # %% [markdown]
 # Ok now we have all the data we need. So we can start training, right?
 
-# %%
-
-# %%# %% [markdown]
+# %% [markdown]
 # ## Exercise 3: Normalization and Preprocessing
 #
 # One issue with residual streams, is that the magnitudes of the activations can vary a lot between layers, often by orders of magnitude.
@@ -882,7 +881,7 @@ trainer = ProbeTrainer(
 # Train with improved features
 losses = trainer.train(
     num_epochs=10,
-    train_indices=list(range(0, 99)),  # Reduced for demo
+    train_indices=list(range(0, 10)),  # Reduced for demo
     val_indices=[99],
     save_checkpoints=True,
     validate_every=1
@@ -918,8 +917,10 @@ for i, (text, res, emb) in list(enumerate(zip(dataset_dict["texts"], dataset_dic
     print(f"{i}: Predicted decoded: {predictions[1]}")
     print()
 
-# %%
+# %% [markdown]
 # You should see that some predictions are pretty similar to the original text.
 # And some of them are completelly broken tbh.
 # You can get better results if you increase train_indices to be range(0, 99), but this will take a while.
 
+
+# %%
