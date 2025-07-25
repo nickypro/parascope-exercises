@@ -42,6 +42,13 @@ from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 from pathlib import Path
 from torch.utils.data import DataLoader
+from huggingface_hub import hf_hub_download
+from datasets import load_dataset
+import gc
+import os
+
+# For the model
+from transformer_lens import HookedTransformer
 
 # SONAR imports
 from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
@@ -53,14 +60,13 @@ from sentence_transformers import SentenceTransformer
 # Disable gradients by default
 torch.set_grad_enabled(False)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {DEVICE}")
+DTYPE = torch.bfloat16
+print(f"Using device: {DEVICE}, dtype: {DTYPE}")
 
 # %% [markdown]
 # ## Load the model
-from transformer_lens import HookedTransformer
-from datasets import load_dataset
 
-model = HookedTransformer.from_pretrained("meta-llama/Llama-3.2-3B-Instruct", device=DEVICE, dtype=torch.bfloat16)
+model = HookedTransformer.from_pretrained("meta-llama/Llama-3.2-3B-Instruct", device=DEVICE, dtype=DTYPE)
 
 # %% [markdown]
 # ## Exercise 1: Generating Training Data
@@ -221,6 +227,10 @@ def split_dataset_prompt_and_sections(dataset) -> List[List[str]]:
         # The first element is the prompt (as a single string), then the completion paragraphs
         split_text = [prompt] + completion_paragraphs
         split_data.append({"id": i, "split_text": split_text})
+
+        if i > 100:
+            # Lazy mode: only do 100 examples
+            break
     return split_data
 
 # Example usage:
@@ -348,57 +358,156 @@ def get_resid_diff_data(split_text, act_types=None, verbose=False):
 resid_diff_data = get_resid_diff_data(split_sections[0]["split_text"], verbose=True)
 resid_diff_data.shape
 
+# note: I kinda wish I stored things as raw residuals instead of diffs, since it's easier to convert to diffs later.
+
+# We are now finished with the model so we can remove it from memory.
+del model
+torch.cuda.empty_cache()
+
 # %%
-# Data loading utilities (simplified from your code)
-BASE_DIR = "./data"  # Adjust this path as needed
+# Now we load the pre-computed residual stream diffs.
 
-def load_res_data(index: int, group_size: int = 2, groups_to_load: int = 28,
-                  group_operation: str = "cat") -> torch.Tensor:
-    """Load residual stream data for a given index."""
-    # Simulate loading - in practice this loads from disk
-    # For demo purposes, create random data
-    n_samples = 1000
-    d_model = 3072  # Llama-3.2-3B hidden size
-    n_layers = groups_to_load
 
-    # In real implementation, this would load from file:
-    # file_path = f"{BASE_DIR}/res_tensors/res_data_{index:03d}.pt"
-    # data = torch.load(file_path)
+# Download and load a specific file (there are total 100 files, 000-099)
+# Note these are slightly older files, so these match up with a different dataset.
 
-    # Simulated data
-    data = torch.randn(n_samples, n_layers * group_size * d_model)
-    return data.float()
+split_sections = load_dataset("nickypro/llama-3b-split", split="train")
+print(split_sections[0])
 
-def load_embeds(index: int) -> torch.Tensor:
-    """Load SONAR embeddings for paragraphs."""
-    # In practice: file_path = f"{BASE_DIR}/sonar_embeds/embeds_{index:03d}.pt"
-    n_samples = 1000
-    d_sonar = 1024
-    return torch.randn(n_samples, d_sonar).float()
+file_path = hf_hub_download(
+    repo_id="nickypro/llama-3b-residuals",
+    filename="res_data_000.pt",
+    repo_type="dataset"
+)
 
-def load_split_paragraphs(index: int) -> List[str]:
-    """Load the actual paragraph texts."""
-    # In practice: file_path = f"{BASE_DIR}/split_paragraphs/paragraphs_{index:03d}.json"
-    # Simulated paragraphs
-    paragraphs = [f"This is paragraph {i} from file {index}." for i in range(1000)]
-    return paragraphs
+# Load the tensor
+tensor_data = torch.load(file_path)
+print(f"Loaded tensor shape: {tensor_data[0].shape}")
 
-# Test loading
-print("Testing data loading...")
-res_data = load_res_data(0, groups_to_load=14)  # Using half the layers
-embeds = load_embeds(0)
-paragraphs = load_split_paragraphs(0)
+# %%
+# ## Creating the embeddings.
+# Now we use SONAR to create embeddings for each paragraph.
+# We use the `sonar.inference_pipelines.text.TextToEmbeddingModelPipeline` class to create the embeddings.
+# We do this for all the paragraphs in the dataset.
 
-print(f"Residual data shape: {res_data.shape}")
-print(f"Embeddings shape: {embeds.shape}")
-print(f"Number of paragraphs: {len(paragraphs)}")
-print(f"Example paragraph: {paragraphs[0]}")
+# Note again we use a slightly older dataset because I haven't uploaded the new ones to huggingface yet.
+split_sections = load_dataset("nickypro/llama-3b-split", split="train")
+print(len(split_sections[0]['split']))
+
+text2vec = TextToEmbeddingModelPipeline(
+    encoder="text_sonar_basic_encoder",
+    tokenizer="text_sonar_basic_encoder",
+    device=DEVICE,
+    dtype=DTYPE,
+)
+
+vec2text = EmbeddingToTextModelPipeline(
+    decoder="text_sonar_basic_decoder",
+    tokenizer="text_sonar_basic_encoder",
+    device=DEVICE,
+    dtype=DTYPE,
+)
+
+# %% We try to get the embeddings, and also compare some examples of how well it decodes.
+
+embeds = []
+
+for i, example in enumerate(tqdm(split_sections)):
+    _id = example["id"]
+    split_texts = example["split"]
+    embeddings = text2vec.predict(split_texts, source_lang="eng_Latn")
+    embeds.append(embeddings)
+    print(embeddings.shape)
+    decoded_texts = vec2text.predict(embeddings, target_lang="eng_Latn")
+    for j, t in enumerate(split_texts):
+        print("original:  ", [t])
+        print("predicted: ", [decoded_texts[j]])
+    break
+
+# %% alternatively, we can yet again use the pre-computed embeddings.
+
+embeds = torch.load(hf_hub_download(
+    repo_id="nickypro/llama-3b-embeds",
+    filename="embeds_000.pt",
+    repo_type="dataset"
+))
+print(embeds[0].shape)
+
+for i, embed in enumerate(embeds):
+    decoded_texts = vec2text.predict(embed.to(DTYPE), target_lang="eng_Latn")
+    print(f"original:  {[split_sections[i]['split'][1]]}")
+    print(f"predicted: {[decoded_texts[0]]}")
+    break
 
 # %% [markdown]
+# Now we have shown how to get the data, we can remove the text2vec pipeline from memory. and instead use the pre-computed embeddings.
+# %%
+del text2vec
+torch.cuda.empty_cache()
+
+# %%
+# Now we just load all data.
+# Note that this data only saves:
+# - residuals[:-1]
+# - embeds[1:]
+# since we only use each residual to predict the next embedding.
+# Thus they should match up already.
+
+def load_all_data(index: int = 0):
+    split_sections = load_dataset("nickypro/llama-3b-split", split="train")
+
+    res_data_file_path = hf_hub_download(
+        repo_id="nickypro/llama-3b-residuals",
+        filename=f"res_data_{index:03d}.pt",
+        repo_type="dataset"
+    )
+    res_data = torch.load(res_data_file_path, map_location='cpu')
+
+    embeds_file_path = hf_hub_download(
+        repo_id="nickypro/llama-3b-embeds",
+        filename=f"embeds_{index:03d}.pt",
+        repo_type="dataset"
+    )
+    embeds = torch.load(embeds_file_path, map_location='cpu')
+
+    assert len(res_data) == len(embeds)
+    dataset = []
+    res_reshape = "1 layer section dim -> section layer dim"
+    for i, (res, embed) in enumerate(zip(res_data, embeds)):
+        _id = i + 1000 * index
+        dataset.append({
+            "id": _id,
+            "res_data": einops.rearrange(res, res_reshape),
+            "embeds": embed,
+            "split_text": split_sections[_id]["split"],
+        })
+    return dataset
+
+dataset = load_all_data()
+
+print(len(dataset))
+print(dataset[0]["id"])
+print(dataset[0]["res_data"].shape)
+print(dataset[0]["embeds"].shape)
+[print([p]) for p in dataset[0]["split_text"]]
+
+# %% [markdown]
+# Ok now we have all the data we need. So we can start training, right?
+
+# %%
+
+# %%# %% [markdown]
 # ## Exercise 3: Normalization and Preprocessing
 #
-# The residual streams and embeddings need normalization for stable training.
+# One issue with residual streams, is that the magnitudes of the activations can vary a lot between layers, often by orders of magnitude.
+# This can cause issues for training, so we need to normalize the data.
 # We use Welford's algorithm to compute running statistics.
+# We compute the mean and variance of the residual streams and embeddings, and then normalize the data to have mean 0 and variance 1.
+# We then store the mean and variance, so we can restore the data later.
+#
+# In essense, we do the most naive method of normalization, which is to look at each dimension independently and normalize it to have mean 0 and variance 1.
+# There may be better ways do do this, I have not spent much time optimizing this.
+# While we do need to normalize the residuals, I am not sure if we need to do it for the embeddings, but I do it anyway.
 
 # %%
 @dataclass
@@ -408,23 +517,44 @@ class WelfordStats:
     m2: torch.Tensor
     count: int
 
+    def __init__(self, mean: torch.Tensor = None, m2: torch.Tensor = None, count: int = 0):
+        if mean is not None and m2 is not None:
+            self.mean = mean
+            self.m2 = m2
+            self.count = count
+        else:
+            self.mean = None
+            self.m2 = None
+            self.count = 0
+
     def update(self, new_data: torch.Tensor):
-        """Update statistics with new batch of data."""
-        batch_size = new_data.shape[0]
-        for i in range(batch_size):
+        """Update statistics with new batch of data (batched version, true Welford)."""
+        # new_data: (batch, d)
+        if self.mean is None or self.m2 is None:
+            self.mean = torch.zeros_like(new_data[0])
+            self.m2 = torch.zeros_like(new_data[0])
+            self.count = 0
+        for x in new_data:
             self.count += 1
-            delta = new_data[i] - self.mean
+            delta = x - self.mean
             self.mean += delta / self.count
-            delta2 = new_data[i] - self.mean
+            delta2 = x - self.mean
             self.m2 += delta * delta2
 
     @property
-    def variance(self):
+    def sample_variance(self):
+        # Unbiased sample variance
         return self.m2 / (self.count - 1) if self.count > 1 else torch.zeros_like(self.m2)
 
     @property
+    def population_variance(self):
+        # Population variance
+        return self.m2 / self.count if self.count > 0 else torch.zeros_like(self.m2)
+
+    @property
     def std(self):
-        return torch.sqrt(self.variance + 1e-6)
+        # Use sample variance by default
+        return torch.sqrt(self.sample_variance + 1e-6)
 
 class Normalizer:
     """Normalize data using precomputed statistics."""
@@ -440,508 +570,356 @@ class Normalizer:
 
 # Compute normalization statistics (in practice, load precomputed stats)
 print("Computing normalization statistics...")
-res_stats = WelfordStats(
-    mean=torch.zeros(res_data.shape[1]),
-    m2=torch.zeros(res_data.shape[1]),
-    count=0
-)
-embed_stats = WelfordStats(
-    mean=torch.zeros(embeds.shape[1]),
-    m2=torch.zeros(embeds.shape[1]),
-    count=0
-)
+res_stats = WelfordStats()
+embed_stats = WelfordStats()
 
 # Update with data
-res_stats.update(res_data)
-embed_stats.update(embeds)
+for i, example in enumerate(tqdm(dataset)):
+    res_stats.update(example["res_data"])
+    embed_stats.update(example["embeds"])
 
 # Create normalizers
-res_normalizer = Normalizer(res_stats.mean, res_stats.std)
-embed_normalizer = Normalizer(embed_stats.mean, embed_stats.std)
+res_normalizer = Normalizer(res_stats.mean, res_stats.std, device='cpu')
+embed_normalizer = Normalizer(embed_stats.mean, embed_stats.std, device='cpu')
 
 # Test normalization
-normalized_res = res_normalizer.normalize(res_data[:10].to(DEVICE))
-print(f"Normalized residual mean: {normalized_res.mean():.4f}, std: {normalized_res.std():.4f}")
+def test_normalization(dataset):
+    normalized_res    = res_normalizer.normalize(dataset[0]["res_data"])
+    normalized_embeds = embed_normalizer.normalize(dataset[0]["embeds"])
+    print(f"Normalized residual mean: {normalized_res.mean():.4f}, std: {normalized_res.std():.4f}")
+    print(f"Normalized embeds mean: {normalized_embeds.mean():.4f}, std: {normalized_embeds.std():.4f}")
+
+test_normalization(dataset)
 
 # %% [markdown]
 # ## Exercise 4: Define Probe Models
 #
-# We'll implement both Linear and MLP probes to map from residual streams to SONAR embeddings.
+# We'll implement a simple Linear probes to map from residual streams to SONAR embeddings.
+# We could take all of the layers [0..57] but I found diminishing returns after 24 layers.
+# I also have tried MLPs, but their performance was basically identical to the linear probe.
 
 # %%
 class LinearProbe(nn.Module):
     """Simple linear mapping from residual stream to SONAR embedding."""
-    def __init__(self, d_res: int, d_sonar: int = 1024):
+    def __init__(self, d_res: int = 3072, d_sonar: int = 1024, n_layers_to_use: int = 24):
         super().__init__()
-        self.linear = nn.Linear(d_res, d_sonar)
-
-        # Initialize weights
-        nn.init.normal_(self.linear.weight, std=0.02)
-        nn.init.zeros_(self.linear.bias)
+        self.n_layers_to_use = n_layers_to_use
+        d_in = d_res * self.n_layers_to_use
+        self.linear = nn.Linear(d_in, d_sonar)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # use the last n_layers_to_use layers of residual diffs
+        x = x[..., -self.n_layers_to_use:, :].flatten(start_dim=-2)
         return self.linear(x)
 
-class MLPProbe(nn.Module):
-    """MLP probe with hidden layers for more expressive mapping."""
-    def __init__(self, d_res: int, d_hidden: int = 8192, d_sonar: int = 1024,
-                 dropout: float = 0.05):
-        super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(d_res, d_hidden),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_hidden, d_hidden),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_hidden, d_sonar)
-        )
-
-        # Initialize weights
-        for layer in self.layers:
-            if isinstance(layer, nn.Linear):
-                nn.init.normal_(layer.weight, std=0.02)
-                nn.init.zeros_(layer.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.layers(x)
-
 # Create probe models
-d_res = res_data.shape[1]
-linear_probe = LinearProbe(d_res).to(DEVICE)
-mlp_probe = MLPProbe(d_res).to(DEVICE)
+d_res = dataset[0]["res_data"].shape[-1]
+linear_probe = LinearProbe(d_res).to(DEVICE, DTYPE)
 
 print(f"Linear probe parameters: {sum(p.numel() for p in linear_probe.parameters()):,}")
-print(f"MLP probe parameters: {sum(p.numel() for p in mlp_probe.parameters()):,}")
 
 # %% [markdown]
-# ## Exercise 5: Training Loop (Demonstration)
+# ## Exercise 5: Training Loop
 #
-# Here's how the probes would be trained. In practice, this takes hours,
-# so we'll load pre-trained weights instead.
+# We now train the probe to map from [residual stream] to [SONAR embedding].
+# For efficiency, we currently load data from 10,000 texts (index=0...9), but this could be extended to 100,000 (index=0...99).
+# We use index 99 as a relatively independent validation set, and validate every epoch.
+#
 
 # %%
-def train_probe_demo(probe: nn.Module, res_data: torch.Tensor, embeds: torch.Tensor,
-                     num_epochs: int = 1, batch_size: int = 32, lr: float = 2e-5):
-    """
-    Demonstration of probe training loop.
-    NOTE: This is simplified - full training would take much longer!
-    """
-    torch.set_grad_enabled(True)
 
-    # Normalize data
-    res_norm = res_normalizer.normalize(res_data)
-    embed_norm = embed_normalizer.normalize(embeds)
+class ProbeTrainer:
+    def __init__(
+        self,
+        probe: nn.Module,
+        lr: float = 1e-5,
+        weight_decay: float = 1e-6,
+        lr_decay: float = 0.8,
+        batch_size: int = 1024,
+        dtype=DTYPE,
+        device=DEVICE,
+        checkpoint_dir: str = "./checkpoints",
+    ):
+        self.probe = probe
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.lr_decay = lr_decay
+        self.batch_size = batch_size
+        self.dtype = dtype
+        self.device = device
+        self.checkpoint_dir = checkpoint_dir
 
-    # Create data loader
-    dataset = torch.utils.data.TensorDataset(res_norm, embed_norm)
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
-    # Setup training
-    optimizer = torch.optim.Adam(probe.parameters(), lr=lr, weight_decay=1e-7)
-    criterion = nn.MSELoss()
-
-    probe.train()
-    losses = []
-
-    print(f"Training {probe.__class__.__name__}...")
-    for epoch in range(num_epochs):
-        epoch_loss = 0
-        for batch_x, batch_y in tqdm(loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
-            batch_x = batch_x.to(DEVICE)
-            batch_y = batch_y.to(DEVICE)
-
-            # Forward pass
-            pred = probe(batch_x)
-            loss = criterion(pred, batch_y)
-
-            # Backward pass
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            epoch_loss += loss.item()
-
-        avg_loss = epoch_loss / len(loader)
-        losses.append(avg_loss)
-        print(f"Epoch {epoch+1} - Loss: {avg_loss:.4f}")
-
-    torch.set_grad_enabled(False)
-    return losses
-
-# Demonstrate training for just 1 epoch (normally would be 10+)
-# losses = train_probe_demo(linear_probe, res_data[:100], embeds[:100], num_epochs=1)
-print("In practice, training takes hours. We'll load pre-trained probes instead.")
-
-# %% [markdown]
-# ## Exercise 6: Load Pre-trained Probes
-#
-# Since training takes too long, let's load pre-trained probe weights.
-
-# %%
-def load_pretrained_probe(probe_type: str = "linear") -> nn.Module:
-    """
-    Load pre-trained probe weights.
-    In practice, this would load from a checkpoint file.
-    """
-    d_res = res_data.shape[1]
-
-    if probe_type == "linear":
-        probe = LinearProbe(d_res).to(DEVICE)
-        # In practice: probe.load_state_dict(torch.load("checkpoints/linear_probe.pt"))
-    else:
-        probe = MLPProbe(d_res).to(DEVICE)
-        # In practice: probe.load_state_dict(torch.load("checkpoints/mlp_probe.pt"))
-
-    probe.eval()
-    print(f"Loaded pre-trained {probe_type} probe")
-    return probe
-
-# Load pre-trained probes
-linear_probe = load_pretrained_probe("linear")
-mlp_probe = load_pretrained_probe("mlp")
-
-# %% [markdown]
-# ## Exercise 7: Generate Text with SONAR Parascopes
-#
-# Now let's use the trained probes to decode residual streams into text.
-
-# %%
-def sonar_parascope_decode(probe: nn.Module, residual_stream: torch.Tensor,
-                          paragraphs: List[str] = None) -> List[str]:
-    """
-    Decode residual streams to text using SONAR parascope.
-
-    Args:
-        probe: Trained probe model (Linear or MLP)
-        residual_stream: Residual activations [batch, d_res]
-        paragraphs: Original paragraphs for comparison (optional)
-
-    Returns:
-        List of decoded texts
-    """
-    probe.eval()
-    with torch.no_grad():
-        # Normalize residual stream
-        res_norm = res_normalizer.normalize(residual_stream.to(DEVICE))
-
-        # Map to SONAR embedding space
-        sonar_embed_norm = probe(res_norm)
-
-        # Denormalize to get actual SONAR embeddings
-        sonar_embed = embed_normalizer.restore(sonar_embed_norm)
-
-        # Decode with SONAR
-        decoded_texts = vec2text.predict(
-            sonar_embed.cpu(),
-            target_lang="eng_Latn",
-            max_seq_len=512
+        # Training components
+        self.criterion = nn.MSELoss()
+        self.optimizer = torch.optim.Adam(
+            self.probe.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay
+        )
+        self.scheduler = torch.optim.lr_scheduler.StepLR(
+            self.optimizer,
+            step_size=1,
+            gamma=self.lr_decay
         )
 
-    return decoded_texts
+        # Ensure checkpoint directory exists
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
 
-# Test on a few examples
-test_indices = [0, 1, 2]
-test_res = res_data[test_indices]
-test_paragraphs = [paragraphs[i] for i in test_indices]
+    @staticmethod
+    def preprocess_dataset(dataset: list[dict]):
+        """Convert dataset to tensors and normalize."""
+        dataset_dict = {
+            "texts": [example["split_text"][1:] for example in dataset],
+            "res_data": res_normalizer.normalize(torch.cat([example["res_data"] for example in dataset])),
+            "embeds": embed_normalizer.normalize(torch.cat([example["embeds"] for example in dataset])),
+        }
+        return dataset_dict
 
-# Decode with both probes
-linear_decoded = sonar_parascope_decode(linear_probe, test_res)
-mlp_decoded = sonar_parascope_decode(mlp_probe, test_res)
+    def get_dataloader(self, res_data, embeds, shuffle=True):
+        """Create DataLoader with proper memory management."""
+        dataset = torch.utils.data.TensorDataset(res_data, embeds)
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=shuffle,
+            pin_memory=True if self.device.type == 'cuda' else False
+        )
+        return loader
 
-print("SONAR Parascope Results:")
-print("="*80)
-for i, idx in enumerate(test_indices):
-    print(f"\nExample {idx}:")
-    print(f"Original:   {test_paragraphs[i]}")
-    print(f"Linear:     {linear_decoded[i]}")
-    print(f"MLP:        {mlp_decoded[i]}")
+    def train_epoch(self, epoch: int, train_indices: List[int]) -> float:
+        """Train for one epoch with improved memory management."""
+        self.probe.train()
+        epoch_train_loss = 0
+        n_train_batches = 0
 
-# %% [markdown]
-# ## Exercise 8: Comparison with Continuation Parascope
-#
-# Let's compare SONAR parascopes with the continuation parascope from Section 2.
+        pbar = tqdm(train_indices, desc=f"Train Epoch {epoch+1}")
+        for data_idx in pbar:
+            try:
+                # Load data for this file
+                dataset = load_all_data(data_idx)
+                dataset_dict = self.preprocess_dataset(dataset)
+                res_data = dataset_dict["res_data"]
+                embeds = dataset_dict["embeds"].to(self.dtype)
 
-# %%
-# Load sentence transformer for evaluation
-sent_model = SentenceTransformer('all-mpnet-base-v2')
+                # Create dataloader
+                loader = self.get_dataloader(res_data, embeds, shuffle=True)
 
-def compare_methods(original_texts: List[str],
-                   sonar_linear: List[str],
-                   sonar_mlp: List[str],
-                   continuation: List[str] = None) -> pd.DataFrame:
-    """
-    Compare different parascope methods using cosine similarity.
-    """
-    results = []
+                # Training loop for this file
+                for batch_x, batch_y in loader:
+                    batch_x = batch_x.to(self.device, non_blocking=True)
+                    batch_y = batch_y.to(self.device, non_blocking=True)
 
-    for i, orig in enumerate(original_texts):
-        orig_emb = sent_model.encode(orig)
+                    # Forward pass
+                    self.optimizer.zero_grad()
+                    pred = self.probe(batch_x)
+                    loss = self.criterion(pred, batch_y)
 
-        # Compute similarities
-        linear_emb = sent_model.encode(sonar_linear[i])
-        mlp_emb = sent_model.encode(sonar_mlp[i])
+                    # Backward pass
+                    loss.backward()
+                    self.optimizer.step()
 
-        linear_sim = np.dot(orig_emb, linear_emb) / (np.linalg.norm(orig_emb) * np.linalg.norm(linear_emb))
-        mlp_sim = np.dot(orig_emb, mlp_emb) / (np.linalg.norm(orig_emb) * np.linalg.norm(mlp_emb))
+                    epoch_train_loss += loss.item()
+                    n_train_batches += 1
 
-        result = {
-            'index': i,
-            'linear_similarity': linear_sim,
-            'mlp_similarity': mlp_sim
+                    # Update progress bar
+                    current_avg_loss = epoch_train_loss / n_train_batches
+                    pbar.set_postfix({
+                        "Loss": f"{current_avg_loss:.4f}",
+                        "LR": f"{self.scheduler.get_last_lr()[0]:.2e}"
+                    })
+
+                # Clean up memory after each file
+                del dataset, dataset_dict, res_data, embeds, loader
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            except Exception as e:
+                print(f"Error processing file {data_idx}: {e}")
+                continue
+
+        return epoch_train_loss / max(n_train_batches, 1)
+
+    @torch.no_grad()
+    def validate(self, val_indices: List[int]) -> float:
+        """Validate the model with improved memory management."""
+        self.probe.eval()
+        epoch_val_loss = 0
+        n_val_batches = 0
+
+        with torch.no_grad():
+            for data_idx in tqdm(val_indices, desc="Validation"):
+                try:
+                    # Load validation data
+                    dataset = load_all_data(data_idx)
+                    dataset_dict = self.preprocess_dataset(dataset)
+                    res_data = dataset_dict["res_data"]
+                    embeds = dataset_dict["embeds"].to(self.dtype)
+
+                    # Create dataloader
+                    loader = self.get_dataloader(res_data, embeds, shuffle=False)
+
+                    # Validation loop for this file
+                    for batch_x, batch_y in loader:
+                        batch_x = batch_x.to(self.device, non_blocking=True)
+                        batch_y = batch_y.to(self.device, non_blocking=True)
+
+                        pred = self.probe(batch_x)
+                        loss = self.criterion(pred, batch_y)
+                        epoch_val_loss += loss.item()
+                        n_val_batches += 1
+
+                    # Clean up memory after each file
+                    del dataset, dataset_dict, res_data, embeds, loader
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                except Exception as e:
+                    print(f"Error processing validation file {data_idx}: {e}")
+                    continue
+
+        return epoch_val_loss / max(n_val_batches, 1)
+
+    def train(
+        self,
+        num_epochs: int = 1,
+        train_indices: List[int] = list(range(0, 99)),
+        val_indices: List[int] = [99],
+        save_checkpoints: bool = True,
+        validate_every: int = 1,
+    ) -> Dict[str, List[float]]:
+        """
+        Main training loop with improved features.
+
+        Args:
+            num_epochs: Number of epochs to train
+            train_indices: List of data file indices for training
+            val_indices: List of data file indices for validation
+            save_checkpoints: Whether to save model checkpoints
+            validate_every: Validate every N epochs
+
+        Returns:
+            Dictionary containing training and validation losses
+        """
+        torch.set_grad_enabled(True)
+
+        train_losses = []
+        val_losses = []
+
+        print(f"Starting training for {num_epochs} epochs")
+        print(f"Training files: {len(train_indices)}, Validation files: {len(val_indices)}")
+        print(f"Initial LR: {self.lr}, LR Decay: {self.lr_decay}")
+
+        try:
+            for epoch in range(num_epochs):
+                print(f"\nEpoch {epoch+1}/{num_epochs}")
+
+                # Training
+                train_loss = self.train_epoch(epoch, train_indices)
+                train_losses.append(train_loss)
+
+                # Validation
+                if epoch % validate_every == 0 or epoch == num_epochs - 1:
+                    val_loss = self.validate(val_indices)
+                    val_losses.append(val_loss)
+
+                    print(f"Epoch {epoch+1} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+
+                    # Save checkpoint
+                    if save_checkpoints:
+                        checkpoint_path = os.path.join(
+                            self.checkpoint_dir,
+                            f"probe_epoch_{epoch+1}.pkl"
+                        )
+                        self.save_checkpoint(checkpoint_path, epoch, train_loss, val_loss)
+                else:
+                    print(f"Epoch {epoch+1} - Train Loss: {train_loss:.4f}")
+
+                # Step the learning rate scheduler
+                self.scheduler.step()
+
+        except KeyboardInterrupt:
+            print("\nTraining interrupted by user")
+        except Exception as e:
+            print(f"\nTraining error: {e}")
+            raise
+        finally:
+            torch.set_grad_enabled(False)
+
+        return {
+            "train_losses": train_losses,
+            "val_losses": val_losses
         }
 
-        if continuation:
-            cont_emb = sent_model.encode(continuation[i])
-            cont_sim = np.dot(orig_emb, cont_emb) / (np.linalg.norm(orig_emb) * np.linalg.norm(cont_emb))
-            result['continuation_similarity'] = cont_sim
+    def save_checkpoint(self, checkpoint_path: str, epoch: int, train_loss: float, val_loss: float):
+        """Save model checkpoint."""
+        os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': self.probe.state_dict(),
+            'train_loss': train_loss,
+            'val_loss': val_loss
+        }, checkpoint_path)
 
-        results.append(result)
+    def load_checkpoint(self, checkpoint_path: str):
+        """Load model checkpoint."""
+        checkpoint = torch.load(checkpoint_path)
+        self.probe.load_state_dict(checkpoint['model_state_dict'])
+        return checkpoint
 
-    return pd.DataFrame(results)
+linear_probe = LinearProbe(d_res).to(DEVICE, DTYPE)
 
-# Compare on more examples
-n_compare = 50
-compare_res = res_data[:n_compare]
-compare_paragraphs = paragraphs[:n_compare]
-
-linear_decoded = sonar_parascope_decode(linear_probe, compare_res)
-mlp_decoded = sonar_parascope_decode(mlp_probe, compare_res)
-
-# For comparison, simulate continuation parascope results
-# In practice, these would come from Section 2's continuation parascope
-continuation_decoded = [p[:50] + "..." for p in compare_paragraphs]  # Simplified
-
-# Create comparison
-comparison_df = compare_methods(
-    compare_paragraphs,
-    linear_decoded,
-    mlp_decoded,
-    continuation_decoded
+# Use the improved ProbeTrainer
+trainer = ProbeTrainer(
+    probe=linear_probe,
+    lr=5e-5,
+    lr_decay=0.8,
+    batch_size=1024,
+    checkpoint_dir="./probe_checkpoints"
 )
 
-# Visualize results
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-
-# Box plot
-comparison_df[['linear_similarity', 'mlp_similarity', 'continuation_similarity']].plot.box(ax=ax1)
-ax1.set_ylabel('Cosine Similarity')
-ax1.set_title('Method Comparison')
-ax1.set_xticklabels(['Linear\nSONAR', 'MLP\nSONAR', 'Continuation'])
-
-# Scatter plot: Linear vs MLP
-ax2.scatter(comparison_df['linear_similarity'], comparison_df['mlp_similarity'], alpha=0.6)
-ax2.plot([0, 1], [0, 1], 'k--', alpha=0.3)
-ax2.set_xlabel('Linear SONAR Similarity')
-ax2.set_ylabel('MLP SONAR Similarity')
-ax2.set_title('Linear vs MLP Performance')
-
-plt.tight_layout()
-plt.show()
-
-# Print statistics
-print("\nMethod Statistics:")
-print(comparison_df[['linear_similarity', 'mlp_similarity', 'continuation_similarity']].describe())
-
-# %% [markdown]
-# ## Exercise 9: Analyzing Probe Behavior
-#
-# Let's analyze what the probes have learned by examining their weights and outputs.
-
-# %%
-def analyze_probe_weights(probe: nn.Module, probe_name: str):
-    """Analyze the weight structure of a probe."""
-    if isinstance(probe, LinearProbe):
-        weights = probe.linear.weight.data.cpu()
-
-        # Analyze weight magnitudes by input dimension groups
-        # Assuming input is organized as [layer1_attn, layer1_mlp, layer2_attn, ...]
-        d_model = 3072  # Llama hidden size
-        n_segments = weights.shape[1] // d_model
-
-        segment_norms = []
-        for i in range(n_segments):
-            start = i * d_model
-            end = (i + 1) * d_model
-            norm = torch.norm(weights[:, start:end], dim=1).mean().item()
-            segment_norms.append(norm)
-
-        # Visualize
-        plt.figure(figsize=(10, 5))
-        layers = list(range(len(segment_norms) // 2))
-        attn_norms = segment_norms[::2]
-        mlp_norms = segment_norms[1::2]
-
-        x = np.arange(len(layers))
-        width = 0.35
-
-        plt.bar(x - width/2, attn_norms, width, label='Attention')
-        plt.bar(x + width/2, mlp_norms, width, label='MLP')
-
-        plt.xlabel('Layer')
-        plt.ylabel('Average Weight Norm')
-        plt.title(f'{probe_name} Weight Norms by Layer and Component')
-        plt.legend()
-        plt.show()
-
-        return segment_norms
-
-# Analyze linear probe
-print("Analyzing Linear Probe Weights:")
-linear_norms = analyze_probe_weights(linear_probe, "Linear Probe")
-
-# %% [markdown]
-# ## Exercise 10: Advanced Analysis - Information Preservation
-#
-# Let's analyze what types of information are preserved by different methods.
-
-# %%
-def analyze_information_preservation(original_texts: List[str],
-                                   decoded_texts: List[str],
-                                   method_name: str) -> Dict[str, float]:
-    """
-    Analyze what aspects of text are preserved in decoding.
-    """
-    from collections import Counter
-    import re
-
-    preservation_scores = {
-        'length_ratio': [],
-        'word_overlap': [],
-        'unique_words_ratio': [],
-        'punctuation_preserved': []
-    }
-
-    for orig, decoded in zip(original_texts, decoded_texts):
-        # Length preservation
-        length_ratio = len(decoded) / (len(orig) + 1e-6)
-        preservation_scores['length_ratio'].append(length_ratio)
-
-        # Word overlap
-        orig_words = set(re.findall(r'\w+', orig.lower()))
-        decoded_words = set(re.findall(r'\w+', decoded.lower()))
-        overlap = len(orig_words & decoded_words) / (len(orig_words) + 1e-6)
-        preservation_scores['word_overlap'].append(overlap)
-
-        # Unique words preserved
-        unique_ratio = len(decoded_words) / (len(orig_words) + 1e-6)
-        preservation_scores['unique_words_ratio'].append(unique_ratio)
-
-        # Punctuation
-        orig_punct = sum(1 for c in orig if c in '.,!?;:')
-        decoded_punct = sum(1 for c in decoded if c in '.,!?;:')
-        punct_ratio = decoded_punct / (orig_punct + 1e-6)
-        preservation_scores['punctuation_preserved'].append(punct_ratio)
-
-    # Calculate averages
-    avg_scores = {k: np.mean(v) for k, v in preservation_scores.items()}
-
-    # Visualize
-    plt.figure(figsize=(8, 6))
-    metrics = list(avg_scores.keys())
-    values = list(avg_scores.values())
-
-    plt.bar(metrics, values)
-    plt.ylabel('Score')
-    plt.title(f'Information Preservation - {method_name}')
-    plt.xticks(rotation=45)
-    plt.ylim(0, 1.5)
-
-    for i, v in enumerate(values):
-        plt.text(i, v + 0.02, f'{v:.2f}', ha='center')
-
-    plt.tight_layout()
-    plt.show()
-
-    return avg_scores
-
-# Analyze different methods
-print("Information Preservation Analysis:")
-linear_preservation = analyze_information_preservation(
-    compare_paragraphs[:20],
-    linear_decoded[:20],
-    "Linear SONAR"
-)
-mlp_preservation = analyze_information_preservation(
-    compare_paragraphs[:20],
-    mlp_decoded[:20],
-    "MLP SONAR"
+# Train with improved features
+losses = trainer.train(
+    num_epochs=10,
+    train_indices=list(range(0, 99)),  # Reduced for demo
+    val_indices=[99],
+    save_checkpoints=True,
+    validate_every=1
 )
 
 # %% [markdown]
-# ## Summary and Exercises
-#
-# We've explored SONAR parascopes, which learn to map residual streams to text embeddings.
-#
-# ### Key Findings:
-# 1. SONAR parascopes can decode semantic content without using the model's generation
-# 2. MLP probes generally outperform linear probes (more parameters = better fit)
-# 3. Different methods preserve different aspects of the original text
-#
-# ### Additional Exercises to Try:
-#
-# 1. **Layer Selection**: Modify `load_res_data` to use only specific layers (e.g., last 10)
-#    and see how performance changes.
-#
-# 2. **Embedding Visualization**: Use t-SNE or PCA to visualize the learned SONAR embeddings
-#    and see if they cluster by topic.
-#
-# 3. **Cross-Model Transfer**: Train on one model's residuals and test on another's.
-#
-# 4. **Noise Robustness**: Add noise to residual streams and measure degradation.
-#
-# 5. **Fine-grained Analysis**: Compare performance on different text types (technical,
-#    narrative, dialogue).
+# Test performance of the probe
 
-# %% [markdown]
-# ### Bonus Exercise: Visualizing the Embedding Space
-#
-# Let's visualize how residual streams map to SONAR space.
+try:
+    get_name = lambda x: [k for k,v in globals().items() if v is x][0]
+    print(f"{get_name(vec2text)} already loaded")
+except:
+    vec2text = EmbeddingToTextModelPipeline(
+        decoder="text_sonar_basic_decoder",
+        tokenizer="text_sonar_basic_encoder",
+        device=DEVICE,
+        dtype=DTYPE,
+    )
 
 # %%
-from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
 
-def visualize_embedding_space(probe: nn.Module, res_data: torch.Tensor,
-                            labels: List[str] = None, method: str = 'pca'):
-    """Visualize how residual streams map to embedding space."""
-    probe.eval()
-    with torch.no_grad():
-        # Get embeddings
-        res_norm = res_normalizer.normalize(res_data.to(DEVICE))
-        embeddings = probe(res_norm).cpu().numpy()
+dataset_dict = ProbeTrainer.preprocess_dataset(load_all_data(99))
 
-        # Reduce dimensions
-        if method == 'pca':
-            reducer = PCA(n_components=2)
-        else:
-            reducer = TSNE(n_components=2, random_state=42)
+for i, (text, res, emb) in list(enumerate(zip(dataset_dict["texts"], dataset_dict["res_data"], dataset_dict["embeds"])))[:100:5]:
+    output = linear_probe(res.to(DEVICE)).to('cpu')
+    emb    = emb.to('cpu')
+    print(f"{i}: Mean Squared Error: {torch.nn.functional.mse_loss(emb, output)}")
+    print(f"{i}: Cosine similarity: {torch.nn.functional.cosine_similarity(emb, output, dim=0)}")
+    output = embed_normalizer.restore(output).to(DEVICE, DTYPE)
+    emb    = embed_normalizer.restore(emb).to(DEVICE, DTYPE)
+    predictions = vec2text.predict([emb, output], target_lang="eng_Latn")
+    print(f"{i}: Original decoded: {predictions[0]}")
+    print(f"{i}: Predicted decoded: {predictions[1]}")
+    print()
 
-        reduced = reducer.fit_transform(embeddings)
+# %%
+# You should see that some predictions are pretty similar to the original text.
+# And some of them are completelly broken tbh.
+# You can get better results if you increase train_indices to be range(0, 99), but this will take a while.
 
-        # Plot
-        plt.figure(figsize=(10, 8))
-        scatter = plt.scatter(reduced[:, 0], reduced[:, 1],
-                            c=range(len(reduced)), cmap='viridis',
-                            alpha=0.6)
-        plt.colorbar(scatter, label='Sample Index')
-        plt.xlabel(f'{method.upper()} Component 1')
-        plt.ylabel(f'{method.upper()} Component 2')
-        plt.title(f'Residual → SONAR Embedding Space ({probe.__class__.__name__})')
-
-        # Add some labels if provided
-        if labels:
-            for i in range(min(5, len(labels))):
-                plt.annotate(labels[i][:20] + '...',
-                           (reduced[i, 0], reduced[i, 1]),
-                           fontsize=8, alpha=0.7)
-
-        plt.tight_layout()
-        plt.show()
-
-# Visualize embedding spaces
-print("Visualizing embedding spaces...")
-visualize_embedding_space(linear_probe, res_data[:100], paragraphs[:100], 'pca')
-visualize_embedding_space(mlp_probe, res_data[:100], paragraphs[:100], 'pca')
-
-print("\nExercise complete! Try modifying the probe architectures or training procedures to improve performance.")
