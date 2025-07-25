@@ -786,7 +786,7 @@ class ProbeTrainer:
         num_epochs: int = 1,
         train_indices: List[int] = list(range(0, 99)),
         val_indices: List[int] = [99],
-        save_checkpoints: bool = True,
+        save_checkpoints: bool = False,
         validate_every: int = 1,
     ) -> Dict[str, List[float]]:
         """
